@@ -1,9 +1,11 @@
-"""AI summarization module (stubs).
+"""AI summarization module.
 
-Implements prompt building, API call, and fallback write.
+Supports x.ai Responses API primarily, with OpenAI as a fallback.
 """
 from __future__ import annotations
 
+import json
+import os
 from typing import Dict
 
 
@@ -16,12 +18,12 @@ def build_payload(aggregated: Dict) -> Dict:
 
 
 def generate_summary(payload: Dict) -> str:
-    """Call OpenAI API and return markdown summary.
+    """Call x.ai or OpenAI and return a markdown summary.
 
-    Implements the system prompt rules from the spec exactly and returns
-    the markdown string. On API failure an exception is raised by the caller.
+    Uses environment-only configuration. Secret values are never written to
+    the repository and are expected to live in local environment variables or
+    a local .env file.
     """
-    import os
     try:
         import openai
     except Exception:
@@ -47,29 +49,25 @@ def generate_summary(payload: Dict) -> str:
     # Build user content from payload -> include the payload as JSON
     user_content = "```json\n" + (json.dumps(payload, indent=2)) + "\n```"
 
-    # Prefer GROK if configured
-    grok_key = os.environ.get("GROK_API_KEY")
-    grok_url = os.environ.get("GROK_API_URL")
-    if grok_key and grok_url:
+    # Prefer x.ai if configured
+    xai_key = os.environ.get("XAI_API_KEY") or os.environ.get("GROK_API_KEY")
+    xai_url = os.environ.get("XAI_API_URL") or os.environ.get("GROK_API_URL") or "https://api.x.ai/v1/responses"
+    if xai_key:
         if requests is None:
-            raise RuntimeError("requests package not installed; required for GROK support")
-        headers = {"Authorization": f"Bearer {grok_key}", "Content-Type": "application/json"}
+            raise RuntimeError("requests package not installed; required for x.ai support")
+        headers = {"Authorization": f"Bearer {xai_key}", "Content-Type": "application/json"}
         body = {
-            "prompt": system_prompt + "\n\n" + user_content,
+            "model": os.environ.get("XAI_MODEL", "grok-4.5"),
+            "input": system_prompt + "\n\n" + user_content,
             "temperature": 0.3,
             "max_tokens": 800,
         }
-        resp = requests.post(grok_url, headers=headers, json=body, timeout=30)
+        resp = requests.post(xai_url, headers=headers, json=body, timeout=30)
         resp.raise_for_status()
         data = resp.json()
-        # Try common response fields for text
-        text = data.get("text") or data.get("output") or None
+        text = _extract_xai_text(data)
         if not text:
-            choices = data.get("choices") or []
-            if choices and isinstance(choices, list) and isinstance(choices[0], dict):
-                text = choices[0].get("text") or choices[0].get("message", {}).get("content")
-        if not text:
-            # fallback to raw body
+            # fallback to raw body so we never lose data
             text = json.dumps(data)
         return str(text).strip()
 
@@ -93,7 +91,55 @@ def generate_summary(payload: Dict) -> str:
         text = choices[0]["message"]["content"]
         return text.strip()
 
-    raise RuntimeError("No LLM configured: set GROK_API_KEY+GROK_API_URL or OPENAI_API_KEY in environment")
+    raise RuntimeError("No LLM configured: set XAI_API_KEY (optionally XAI_API_URL) or OPENAI_API_KEY in environment")
+
+
+def _extract_xai_text(data: Dict) -> str:
+    """Extract text from x.ai Responses API variants.
+
+    Tries common shapes first, then recursively searches for obvious text
+    payloads inside nested output structures.
+    """
+    candidates = [
+        data.get("output_text"),
+        data.get("text"),
+        data.get("output"),
+        data.get("response"),
+    ]
+    for c in candidates:
+        if isinstance(c, str) and c.strip():
+            return c.strip()
+
+    # Responses API commonly returns a nested output list.
+    output = data.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            # Common patterns: {content:[{type:'output_text', text:'...'}]}
+            content = item.get("content") or []
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict):
+                        text = part.get("text") or part.get("output_text")
+                        if isinstance(text, str) and text.strip():
+                            return text.strip()
+            # Sometimes a direct 'text' or nested 'message'
+            direct = item.get("text")
+            if isinstance(direct, str) and direct.strip():
+                return direct.strip()
+            message = item.get("message") or {}
+            if isinstance(message, dict):
+                msg_text = message.get("content")
+                if isinstance(msg_text, str) and msg_text.strip():
+                    return msg_text.strip()
+                if isinstance(msg_text, list):
+                    for part in msg_text:
+                        if isinstance(part, dict):
+                            t = part.get("text")
+                            if isinstance(t, str) and t.strip():
+                                return t.strip()
+    return ""
 
 
 def write_summary(markdown: str, output_dir: str) -> None:
