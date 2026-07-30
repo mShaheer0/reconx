@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recon-orchestrator"
+version = "0.1.0"
+description = "CLI orchestrator for passive and active reconnaissance"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "python-dotenv>=1.0.0",
+    "openai>=1.0.0",
+    "requests>=2.0.0",
+]
+
+[project.scripts]
+recon-orchestrator = "main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["recon*", "config*"]
+
+[tool.setuptools]
+py-modules = ["main"]
